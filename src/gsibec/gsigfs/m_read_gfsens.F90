@@ -185,7 +185,11 @@ contains
     if (mype /= proc1) return
 
     write(6,'(2a,1x,i5,1x,a)') myname__, ': reading file on PE= ', mype, trim(filename(n))
-    call nc_GFSens_read(filename(n), evars, istatus, myid=mype, root=proc1, gsiset=.true.)
+    ! gfspoles=.true. tells the reader that the GFS gaussian grid file has nlat-2
+    ! latitude rows (no poles).  The reader expands to nlat rows and fills pole
+    ! rows using the same fillpoles_s_ / fillpoles_v_ logic as cplr_gfs_ensmod.f90.
+    call nc_GFSens_read(filename(n), evars, istatus, myid=mype, root=proc1, &
+                        gsiset=.true., gfspoles=.true.)
     if (istatus /= 0) call die(myname__, ': failed reading ensemble member', 99)
     if (evars%nlat /= nlat_g .or. evars%nlon /= nlon_g .or. evars%nsig /= nsig) then
        print *, myname__, ': inconsistent dims (code): ', nlat_g, nlon_g, nsig

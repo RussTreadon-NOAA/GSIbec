@@ -280,22 +280,59 @@ subroutine read_dims_(fname, nlat, nlon, nlev, rc, myid, root)
 end subroutine read_dims_
 
 !---------------------------------------------------------------------------
-subroutine read_GFSens_(fname, bvars, rc, myid, root, gsiset)
+subroutine read_GFSens_(fname, bvars, rc, myid, root, gsiset, gfspoles)
+!$$$ subprogram documentation block
+!                .      .    .                                       .
+! subprogram:    read_GFSens_   read one GFS gaussian grid ensemble member
+!   prgmmr: todling          org: np22                date: 2024-01-01
+!
+! abstract: Read GFS gaussian grid ensemble member from a NetCDF4 file.
+!           When gfspoles=.true. (the normal GFS case), the file is assumed
+!           to contain nlat-2 Gaussian latitude rows (no pole rows).  The
+!           output bvars arrays are expanded to nlat rows by inserting the
+!           south pole (index 1) and north pole (index nlat) and filling
+!           them using the same algorithm as fillpoles_s_ / fillpoles_v_ in
+!           cplr_gfs_ensmod.f90 -- the standard GSIbec / GSI practice.
+!
+!   For scalar fields:
+!     pole_value = mean of the nearest Gaussian latitude row
+!   For vector fields (GSI names sf/u and vp/v):
+!     pole computed from average of nearest row using cos/sin of longitudes
+!     (identical to fillpoles_v_ in cplr_gfs_ensmod.f90)
+!
+!   input argument list:
+!     fname    - NetCDF4 file name
+!     bvars    - nc_GFSens_vars struct (variable names must be set)
+!     myid     - MPI rank of calling process (default 0)
+!     root     - MPI root rank for messages (default 0)
+!     gsiset   - if .true., transpose to (nlat,nlon) GSI layout (default .false.)
+!     gfspoles - if .true., expand from (nlat-2) file rows to (nlat) GSI rows
+!                and fill pole rows; requires gsiset=.true. (default .false.)
+!
+!   output argument list:
+!     bvars    - populated with ensemble data
+!     rc       - return code (0=success)
+!
+!$$$
    implicit none
    character(len=*), intent(in)    :: fname
    type(nc_GFSens_vars), intent(inout) :: bvars
    integer, intent(out) :: rc
    integer, intent(in), optional :: myid, root
    logical, intent(in), optional :: gsiset
+   logical, intent(in), optional :: gfspoles
 
    integer :: ncid, varid, ier
    integer :: kk, nv, nlat, nlon, nlev
    integer :: nlat_, nlon_, nlev_
+   integer :: nlat_file                 ! lats in file (nlat-2 for GFS, nlat for GEOS)
    integer :: mype_, root_
    real(4), allocatable :: data3d(:,:,:)
    real(4), allocatable :: data2d(:,:)
-   logical :: gsi_, verbose, init_
+   real(4), allocatable :: clons(:), slons(:)  ! cos/sin of GFS longitudes for vector poles
+   logical :: gsi_, gfspoles_, verbose, init_
    character(len=32) :: fvname
+   integer :: uid, vid                  ! indices of u/v (sf/vp) in gsi_vnames3d
    character(len=*), parameter :: myname_ = myname//'::read_GFSens_'
 
    rc = 0; mype_ = 0; root_ = 0
@@ -309,9 +346,20 @@ subroutine read_GFSens_(fname, bvars, rc, myid, root, gsiset)
    gsi_ = .false.
    if (present(gsiset)) gsi_ = gsiset
 
+   gfspoles_ = .false.
+   if (present(gfspoles)) gfspoles_ = gfspoles
+
    ! Get dimensions from file
-   call read_dims_(fname, nlat_, nlon_, nlev_, rc, mype_, root_)
+   call read_dims_(fname, nlat_file, nlon_, nlev_, rc, mype_, root_)
    if (rc /= 0) return
+
+   ! Derive GSI nlat: for GFS gaussian grids nlat_gsi = nlat_file + 2 (pole rows added).
+   ! For non-GFS files (gfspoles=.false.) nlat_gsi == nlat_file.
+   if (gfspoles_) then
+      nlat_ = nlat_file + 2
+   else
+      nlat_ = nlat_file
+   endif
 
    init_ = bvars%initialized
    if (init_) then
@@ -320,9 +368,9 @@ subroutine read_GFSens_(fname, bvars, rc, myid, root, gsiset)
       nlev = bvars%nsig
       if (nlon_ /= nlon .or. nlat_ /= nlat .or. nlev_ /= nlev) then
          if (mype_ == root_) then
-            print *, myname_, ': nlat(file)/nlat(req) = ', nlat_, nlat
-            print *, myname_, ': nlon(file)/nlon(req) = ', nlon_, nlon
-            print *, myname_, ': nlev(file)/nlev(req) = ', nlev_, nlev
+            print *, myname_, ': nlat(file+poles)/nlat(req) = ', nlat_, nlat
+            print *, myname_, ': nlon(file)/nlon(req)        = ', nlon_, nlon
+            print *, myname_, ': nlev(file)/nlev(req)        = ', nlev_, nlev
             print *, myname_, ': inconsistent dimensions, aborting'
          endif
          rc = 1
@@ -338,8 +386,9 @@ subroutine read_GFSens_(fname, bvars, rc, myid, root, gsiset)
    call check_(nf90_open(fname, NF90_NOWRITE, ncid), rc, mype_, root_)
    if (rc /= 0) return
 
-   ! Read 3D variables
-   allocate(data3d(nlon, nlat, nlev))
+   ! Read 3D variables.
+   ! data3d is read in file orientation (nlon, nlat_file, nlev).
+   allocate(data3d(nlon, nlat_file, nlev))
    do nv = 1, bvars%nv3d
       fvname = gfs_varname_(bvars%gsi_vnames3d(nv))
       ier = nf90_inq_varid(ncid, trim(fvname), varid)
@@ -351,17 +400,26 @@ subroutine read_GFSens_(fname, bvars, rc, myid, root, gsiset)
          call check_(nf90_get_var(ncid, varid, data3d), rc, mype_, root_)
       endif
       if (gsi_) then
-         do kk = 1, nlev
-            bvars%ptr3d(:,:,kk,nv) = transpose(data3d(:,:,kk))
-         enddo
+         if (gfspoles_) then
+            ! GFS pole expansion: poles (rows 1 and nlat) initialised to zero;
+            ! file rows 1..nlat_file -> GSI rows 2..nlat-1 (S->N CF ordering preserved).
+            bvars%ptr3d(:,:,:,nv) = 0.0
+            do kk = 1, nlev
+               bvars%ptr3d(2:nlat-1,:,kk,nv) = transpose(data3d(:,:,kk))
+            enddo
+         else
+            do kk = 1, nlev
+               bvars%ptr3d(:,:,kk,nv) = transpose(data3d(:,:,kk))
+            enddo
+         endif
       else
          bvars%ptr3d(:,:,:,nv) = data3d
       endif
    enddo
    deallocate(data3d)
 
-   ! Read 2D variables
-   allocate(data2d(nlon, nlat))
+   ! Read 2D variables.
+   allocate(data2d(nlon, nlat_file))
    do nv = 1, bvars%nv2d
       fvname = gfs_varname_(bvars%gsi_vnames2d(nv))
       ier = nf90_inq_varid(ncid, trim(fvname), varid)
@@ -373,7 +431,12 @@ subroutine read_GFSens_(fname, bvars, rc, myid, root, gsiset)
          call check_(nf90_get_var(ncid, varid, data2d), rc, mype_, root_)
       endif
       if (gsi_) then
-         bvars%ptr2d(:,:,nv) = transpose(data2d)
+         if (gfspoles_) then
+            bvars%ptr2d(:,:,nv) = 0.0
+            bvars%ptr2d(2:nlat-1,:,nv) = transpose(data2d)
+         else
+            bvars%ptr2d(:,:,nv) = transpose(data2d)
+         endif
       else
          bvars%ptr2d(:,:,nv) = data2d
       endif
@@ -381,11 +444,50 @@ subroutine read_GFSens_(fname, bvars, rc, myid, root, gsiset)
    deallocate(data2d)
 
    call check_(nf90_close(ncid), rc, mype_, root_)
+   if (rc /= 0) return
 
    if (verbose) print *, myname_, ': finished reading file: ', trim(fname)
 
-   ! Convert from GFS file units to GSI units and flip orientation if needed
+   ! Convert from GFS file units to GSI units (e.g. ps Pa -> centibars).
    call gfs2gsi_(bvars)
+
+   ! Fill pole rows for GFS gaussian grid (gsiset=.true. required).
+   ! Step 1: scalar fill for all fields (mean of the nearest Gaussian row).
+   ! Step 2: override u/v poles with the proper vector formula (fillpoles_v_).
+   ! This matches the fillpoles_s_ / fillpoles_v_ sequence in cplr_gfs_ensmod.f90.
+   if (gfspoles_ .and. gsi_) then
+
+      ! Scalar pole fill for all 3D fields
+      do nv = 1, bvars%nv3d
+         do kk = 1, nlev
+            call fillpoles_s_nc_(bvars%ptr3d(:,:,kk,nv), nlon, nlat)
+         enddo
+      enddo
+      ! Scalar pole fill for all 2D fields
+      do nv = 1, bvars%nv2d
+         call fillpoles_s_nc_(bvars%ptr2d(:,:,nv), nlon, nlat)
+      enddo
+
+      ! Vector pole override for u (sf or u) and v (vp or v) 3D pair.
+      ! GFS longitudes are uniformly spaced 0 to 360: lon(j) = (j-1)*360/nlon deg.
+      allocate(clons(nlon), slons(nlon))
+      call compute_loncs_nc_(nlon, clons, slons)
+
+      uid = getindex(bvars%gsi_vnames3d, 'sf')
+      if (uid <= 0) uid = getindex(bvars%gsi_vnames3d, 'u')
+      vid = getindex(bvars%gsi_vnames3d, 'vp')
+      if (vid <= 0) vid = getindex(bvars%gsi_vnames3d, 'v')
+
+      if (uid > 0 .and. vid > 0) then
+         do kk = 1, nlev
+            call fillpoles_v_nc_(bvars%ptr3d(:,:,kk,uid), &
+                                 bvars%ptr3d(:,:,kk,vid), &
+                                 nlon, nlat, clons, slons)
+         enddo
+      endif
+      deallocate(clons, slons)
+
+   endif
 
 end subroutine read_GFSens_
 
@@ -409,6 +511,80 @@ subroutine gfs2gsi_(x)
    if (id > 0) x%ptr2d(:,:,id) = x%ptr2d(:,:,id) * Pa_to_cb
 
 end subroutine gfs2gsi_
+
+!---------------------------------------------------------------------------
+! Compute cos and sin of GFS Gaussian grid longitudes (uniformly spaced).
+! GFS Gaussian grids have nlon equally spaced longitudes starting at 0 deg:
+!   lon(j) = (j-1) * 360 / nlon  degrees  =>  radians = (j-1) * 2*pi / nlon
+! This is consistent with the clons/slons used in fillpoles_v_ (cplr_gfs_ensmod.f90).
+subroutine compute_loncs_nc_(nlon, clons, slons)
+   use constants, only: pi
+   implicit none
+   integer, intent(in)  :: nlon
+   real(4), intent(out) :: clons(nlon), slons(nlon)
+   integer :: j
+   real(4) :: dlon
+   dlon = real(2.0_8 * pi, 4) / real(nlon, 4)
+   do j = 1, nlon
+      clons(j) = cos(real(j-1) * dlon)
+      slons(j) = sin(real(j-1) * dlon)
+   enddo
+end subroutine compute_loncs_nc_
+
+!---------------------------------------------------------------------------
+! Scalar pole fill: set south pole (row 1) and north pole (row nlat) to the
+! average of the nearest Gaussian latitude row (row 2 and row nlat-1).
+! Array is in GSI orientation: (nlat, nlon).
+! Identical in logic to fillpoles_s_ in cplr_gfs_ensmod.f90.
+subroutine fillpoles_s_nc_(arr, nlon, nlat)
+   implicit none
+   integer, intent(in)    :: nlon, nlat
+   real(4), intent(inout) :: arr(nlat, nlon)
+   integer :: j
+   real(4) :: sums, sumn, rnlon
+   rnlon = 1.0 / real(nlon)
+   sums = sum(arr(2,     :)) * rnlon   ! mean of southernmost Gaussian row
+   sumn = sum(arr(nlat-1,:)) * rnlon   ! mean of northernmost Gaussian row
+   do j = 1, nlon
+      arr(1,   j) = sums
+      arr(nlat,j) = sumn
+   enddo
+end subroutine fillpoles_s_nc_
+
+!---------------------------------------------------------------------------
+! Vector pole fill for u and v on the GFS/GSI Gaussian grid.
+! u and v are each in GSI orientation (nlat, nlon).
+! clons and slons are cos/sin of the GFS longitude values.
+! Identical in logic to fillpoles_v_ in cplr_gfs_ensmod.f90.
+subroutine fillpoles_v_nc_(u, v, nlon, nlat, clons, slons)
+   implicit none
+   integer, intent(in)    :: nlon, nlat
+   real(4), intent(inout) :: u(nlat, nlon), v(nlat, nlon)
+   real(4), intent(in)    :: clons(nlon), slons(nlon)
+   integer :: j
+   real(4) :: polnu, polnv, polsu, polsv, rnlon
+   rnlon = 1.0 / real(nlon, 4)
+   polnu = 0.0
+   polnv = 0.0
+   polsu = 0.0
+   polsv = 0.0
+   do j = 1, nlon
+      polnu = polnu + u(nlat-1,j)*clons(j) - v(nlat-1,j)*slons(j)
+      polnv = polnv + u(nlat-1,j)*slons(j) + v(nlat-1,j)*clons(j)
+      polsu = polsu + u(2,j     )*clons(j) + v(2,j     )*slons(j)
+      polsv = polsv + u(2,j     )*slons(j) - v(2,j     )*clons(j)
+   enddo
+   polnu = polnu * rnlon
+   polnv = polnv * rnlon
+   polsu = polsu * rnlon
+   polsv = polsv * rnlon
+   do j = 1, nlon
+      u(nlat,j) =  polnu*clons(j) + polnv*slons(j)
+      v(nlat,j) = -polnu*slons(j) + polnv*clons(j)
+      u(1,j)    =  polsu*clons(j) + polsv*slons(j)
+      v(1,j)    =  polsu*slons(j) - polsv*clons(j)
+   enddo
+end subroutine fillpoles_v_nc_
 
 !---------------------------------------------------------------------------
 ! flip_ and the associated latflip/levflip subroutines are provided for cases
