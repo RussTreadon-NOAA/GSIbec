@@ -492,23 +492,48 @@ subroutine read_GFSens_(fname, bvars, rc, myid, root, gsiset, gfspoles)
 end subroutine read_GFSens_
 
 !---------------------------------------------------------------------------
-! Convert GFS file units to GSI units.
-! GFS NetCDF4 files (CF-compliant) are assumed to have:
-!   - latitude south-to-north (same as GSI convention)
+! Convert GFS file units/orientation to GSI convention.
+! GFS NetCDF4 files (FV3/CF-compliant) are assumed to have:
+!   - latitude south-to-north (same as GSI convention, no horizontal flip needed)
 !   - longitude 0-360 eastward (same as GSI convention)
-!   - vertical levels from model top to near-surface (same as GSI convention)
-! Therefore only unit conversions are applied, not geometric transformations.
+!   - vertical levels from model top to near-surface (k=1 = model top)
 !
-! Unit conversions:
+! GSI uses bottom-to-top ordering (k=1 = lowest model level, near surface).
+! A vertical level flip is therefore required.
+!
+! Conversions applied:
+!   - Vertical levels flipped (top->bottom to bottom->top) for 3D fields
 !   - Surface pressure: Pa -> centibars (1 cb = 1 kPa = 1000 Pa)
+!   - Temperature T -> virtual temperature Tv = T*(1 + fv*q)
+!     (GFS files store actual temperature; GSI expects virtual temperature,
+!      same as the move2bundle_ convention in cplr_gfs_ensmod.f90)
 subroutine gfs2gsi_(x)
+   use constants, only: fv
    implicit none
    type(nc_GFSens_vars), intent(inout) :: x
-   integer :: id
+   integer :: id, id_t, id_q, nv
+
+   ! Vertical flip: GFS NetCDF4 files store levels top-to-bottom (k=1 = model top).
+   ! GSI uses bottom-to-top (k=1 = surface).  Flip all 3D fields.
+   do nv = 1, x%nv3d
+      call levflip_(x%ptr3d(:,:,:,nv), x%nlon, x%nlat, x%nsig, x%gsiset)
+   enddo
 
    ! Surface pressure: Pa -> centibars (1 cb = 1000 Pa)
    id = getindex(x%gsi_vnames2d, 'ps')
    if (id > 0) x%ptr2d(:,:,id) = x%ptr2d(:,:,id) * Pa_to_cb
+
+   ! Temperature: T -> virtual temperature Tv = T*(1 + fv*q)
+   ! GFS files contain actual temperature ('tmp').  GSI expects virtual temperature
+   ! in the 't'/'tv' bundle slot (same as move2bundle_ in cplr_gfs_ensmod.f90).
+   ! fv is r_kind (double precision); cast to real(4) to match ptr3d storage.
+   ! If neither 't' nor 'tv' is present (id_t<=0), the guard below skips the conversion.
+   id_t = getindex(x%gsi_vnames3d, 't')
+   if (id_t <= 0) id_t = getindex(x%gsi_vnames3d, 'tv')
+   id_q = getindex(x%gsi_vnames3d, 'q')
+   if (id_t > 0 .and. id_q > 0) then
+      x%ptr3d(:,:,:,id_t) = x%ptr3d(:,:,:,id_t) * (1.0 + real(fv, kind=4) * x%ptr3d(:,:,:,id_q))
+   endif
 
 end subroutine gfs2gsi_
 
@@ -587,11 +612,10 @@ subroutine fillpoles_v_nc_(u, v, nlon, nlat, clons, slons)
 end subroutine fillpoles_v_nc_
 
 !---------------------------------------------------------------------------
-! flip_ and the associated latflip/levflip subroutines are provided for cases
-! where GFS files do NOT follow the CF-compliant ordering assumed by gfs2gsi_.
-! If a file has latitude going north-to-south or vertical levels ordered
-! bottom-to-top, callers may invoke flip_() after calling gfs2gsi_().
-! In the standard GFS NetCDF4 (FV3) gaussian grid output, flip_ is not needed.
+! flip_ combines latflip and levflip for cases where the file has both
+! N->S latitude ordering AND bottom-to-top level ordering.
+! For standard GFS NetCDF4 (FV3) gaussian grid files the latitude is already
+! S->N; gfs2gsi_ handles the vertical flip via levflip_ directly.
 subroutine flip_(x)
    implicit none
    type(nc_GFSens_vars), intent(inout) :: x
@@ -678,7 +702,8 @@ subroutine latflip3_(q, im, jm, km, gsi)
 end subroutine latflip3_
 
 !---------------------------------------------------------------------------
-! Flip vertical levels (top->bottom to bottom->top, i.e., surface at index 1 to nsig).
+! Flip vertical levels: converts top-to-bottom (k=1=model top, as in GFS NetCDF4)
+! to bottom-to-top (k=1=surface, as required by GSI).  Called from gfs2gsi_.
 subroutine levflip_(q, im, jm, km, gsi)
    implicit none
    integer, intent(in) :: im, jm, km
