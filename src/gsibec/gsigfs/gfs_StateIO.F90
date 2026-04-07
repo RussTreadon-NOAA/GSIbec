@@ -45,6 +45,14 @@ end interface
 
 character(len=*), parameter :: myname = 'gfs_StateIO'
 
+! Default fallback pattern when ens_fname_tmpl is not set.
+! Use the standard GFS ensemble naming: sigf{FF}_ens_mem{NNN}.nc4
+! where FF is zero-padded 2-digit forecast lead time and NNN is 3-digit member index.
+character(len=*), parameter :: GFS_ENS_FALLBACK_FMT = '(a,a,i2.2,a,i3.3,a)'
+character(len=*), parameter :: GFS_ENS_FALLBACK_MID = 'sigf'
+character(len=*), parameter :: GFS_ENS_FALLBACK_SUF = '_ens_mem'
+character(len=*), parameter :: GFS_ENS_FALLBACK_EXT = '.nc4'
+
 contains
 
 subroutine get_1state_(xx, sgrid, nymd, nhms, iwhat, tau)
@@ -115,8 +123,8 @@ do ii = 1, size(xx)
    ! where FF is the 2-digit forecast lead time (tau, in hours) and NNN is the
    ! 3-digit member index.  Set ens_fname_tmpl in the HYBRID_ENSEMBLE namelist
    ! to override this default.
-   write(fnames(ii), '(a,a,i2.2,a,i3.3,a)') trim(adjustl(ensemble_path)), &
-        'sigf', tau_, '_ens_mem', ii, '.nc4'
+   write(fnames(ii), GFS_ENS_FALLBACK_FMT) trim(adjustl(ensemble_path)), &
+        GFS_ENS_FALLBACK_MID, tau_, GFS_ENS_FALLBACK_SUF, ii, GFS_ENS_FALLBACK_EXT
    endif
 enddo
 
