@@ -97,8 +97,13 @@ integer(i_kind),     intent(in   ) :: nymd, nhms
 integer(i_kind), optional, intent(in) :: tau
 
 character(len=*), parameter :: myname_ = myname//'::get_Nstate_'
-integer :: ii, istatus
+integer :: ii, istatus, tau_
 character(len=255), allocatable :: fnames(:)
+
+! tau_ is the forecast lead time in hours (default 0 if not provided).
+! Used in the fallback filename as the forecast hour (e.g., sigf06_ens_mem001.nc4).
+tau_ = 0
+if (present(tau)) tau_ = tau
 
 allocate(fnames(size(xx)))
 do ii = 1, size(xx)
@@ -106,11 +111,12 @@ do ii = 1, size(xx)
       call strTemplate(fnames(ii), ens_fname_tmpl, nymd=nymd, nhms=nhms, ens=ii, stat=istatus)
    else
    ! Fall back to ensemble_path with standard GFS ensemble naming convention:
-   ! {ensemble_path}sigf{HH}_ens_mem{NNN}.nc4
-   ! where HH is the 2-digit forecast hour and NNN is the 3-digit member index.
-   ! Set ens_fname_tmpl in the HYBRID_ENSEMBLE namelist to override this default.
+   ! {ensemble_path}sigf{FF}_ens_mem{NNN}.nc4
+   ! where FF is the 2-digit forecast lead time (tau, in hours) and NNN is the
+   ! 3-digit member index.  Set ens_fname_tmpl in the HYBRID_ENSEMBLE namelist
+   ! to override this default.
    write(fnames(ii), '(a,a,i2.2,a,i3.3,a)') trim(adjustl(ensemble_path)), &
-        'sigf', nhms/10000, '_ens_mem', ii, '.nc4'
+        'sigf', tau_, '_ens_mem', ii, '.nc4'
    endif
 enddo
 

@@ -57,9 +57,11 @@ end type nc_GFSens_vars
 
 character(len=*), parameter :: myname = 'm_nc_GFSens'
 
-! Unit conversion: surface pressure Pa -> centibars (cb = kPa)
-! 1 cb = 1 kPa = 1000 Pa
-real, parameter :: Pa_to_cb = 1.0e-3  ! Pa to centibars
+! Unit conversion: surface pressure Pa -> centibars (cb)
+! 1 centibar = 0.01 bar = 1000 Pa = 1 kPa = 10 hPa
+! (not to be confused with millibar: 1 mb = 100 Pa = 1 hPa)
+! GSI uses centibars for surface pressure; GFS NetCDF4 files use Pa.
+real, parameter :: Pa_to_cb = 1.0e-3  ! Pa to centibars: 1 cb = 1000 Pa
 
 interface nc_GFSens_dims;      module procedure read_dims_;         end interface
 interface nc_GFSens_read;      module procedure read_GFSens_;       end interface

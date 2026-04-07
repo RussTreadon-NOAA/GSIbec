@@ -154,7 +154,7 @@ contains
 
     ! nsig1o: total number of 2D slices (nc3d vars * nsig levels + nc2d vars).
     ! The max(0,...) guards against nc3d/nc2d being unset (negative) at init.
-    nsig1o = (nsig*max(0,nc3d)) + max(nc2d,0)
+    nsig1o = (nsig*max(0,nc3d)) + max(0,nc2d)
     if (mod(nsig1o, npe) == 0) then
        kchk = npe
     else
